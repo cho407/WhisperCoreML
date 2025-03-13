@@ -3,49 +3,39 @@ import CoreML
 
 /// 성능 최적화 관리자
 public class PerformanceOptimizer {
-    /// 설정
+    /// 최적화 설정
     public struct Configuration {
-        public let enableNeuralEngine: Bool
-        public let enableGPU: Bool
-        public let enableLowPrecision: Bool
+        /// 기본 설정
+        public static let `default` = Configuration()
         
-        public static let `default` = Configuration(
-            enableNeuralEngine: true,
-            enableGPU: true,
-            enableLowPrecision: true
-        )
+        public init() {}
     }
     
+    /// 설정
     private let configuration: Configuration
     
+    /// 초기화
+    /// - Parameter configuration: 최적화 설정
     public init(configuration: Configuration) {
         self.configuration = configuration
     }
     
-    @available(macOS 12.0, iOS 15.0, *)
-    public func recommendedComputeUnits() async -> MLComputeUnits {
-        if configuration.enableNeuralEngine {
-            if #available(macOS 13.0, iOS 16.0, *) {
-                return .cpuAndNeuralEngine
-            }
-        }
-        return configuration.enableGPU ? .cpuAndGPU : .cpuOnly
+    /// 최적의 연산 유닛 반환
+    public func getOptimalComputeUnits() -> MLComputeUnits {
+        #if targetEnvironment(simulator)
+        return .cpuOnly
+        #else
+        return .all
+        #endif
     }
     
+    /// 최적화 제안 반환
     public func getOptimizationSuggestions() async -> [String] {
         var suggestions: [String] = []
         
-        if !configuration.enableNeuralEngine {
-            suggestions.append("Neural Engine을 활성화하여 성능을 향상시킬 수 있습니다.")
-        }
-        
-        if !configuration.enableGPU {
-            suggestions.append("GPU를 활성화하여 성능을 향상시킬 수 있습니다.")
-        }
-        
-        if !configuration.enableLowPrecision {
-            suggestions.append("저정밀도 연산을 활성화하여 메모리 사용량을 줄일 수 있습니다.")
-        }
+        #if targetEnvironment(simulator)
+        suggestions.append("시뮬레이터에서 실행 중입니다. 실제 기기에서 테스트하는 것을 권장합니다.")
+        #endif
         
         return suggestions
     }

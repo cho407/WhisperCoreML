@@ -2,22 +2,30 @@
 // Whisper 모델 관련 코드
 
 import Foundation
-import CoreML
+@preconcurrency import CoreML
 import Combine
 
-/// Whisper 모델 클래스
-public class WhisperModel {
+/// Whisper 모델
+@available(iOS 15.0, macOS 12.0, *)
+public final class WhisperModel: @unchecked Sendable {
     /// 모델 타입
-    public let modelType: WhisperModelType
+    private let modelType: WhisperModelType
     
-    /// 모델 URL
-    private let modelURL: URL
+    /// 인코더 모델 URL
+    private let encoderModelURL: URL
     
-    /// 모델 인스턴스
-    internal var model: MLModel?
+    /// 디코더 모델 URL
+    private let decoderModelURL: URL
     
     /// 오디오 프로세서
-    public let audioProcessor = AudioProcessor()
+    /// 인코더 모델 인스턴스
+    internal var encoderModel: MLModel?
+    
+    /// 디코더 모델 인스턴스
+    internal var decoderModel: MLModel?
+    
+    /// 오디오 프로세서
+    internal let audioProcessor: AudioProcessor
     
     /// 취소 토큰
     internal var cancellables = Set<AnyCancellable>()
@@ -39,80 +47,81 @@ public class WhisperModel {
     /// - Throws: 토크나이저 로드 실패 시 오류
     public init(modelType: WhisperModelType) throws {
         self.modelType = modelType
-        self.modelURL = modelType.localModelPath()
+        self.encoderModelURL = modelType.localEncoderModelPath()
+        self.decoderModelURL = modelType.localDecoderModelPath()
+        
+        // 각 컴포넌트 초기화
+        self.audioProcessor = AudioProcessor()
+        self.performanceOptimizer = PerformanceOptimizer(configuration: .default)
         
         // 토크나이저 초기화
-        let tokenizerResult = try Self.loadTokenizer()
-        self.tokenizer = tokenizerResult
-        
-        // 성능 최적화 관리자 초기화
-        self.performanceOptimizer = PerformanceOptimizer(configuration: .default)
+        self.tokenizer = try WhisperModel.loadTokenizer()
     }
     
     /// 초기화 메서드 (모델 경로 직접 지정)
-    /// - Parameter modelPath: 모델 파일 경로
+    /// - Parameters:
+    ///   - encoderPath: 인코더 모델 파일 경로
+    ///   - decoderPath: 디코더 모델 파일 경로
     /// - Throws: 토크나이저 로드 실패 시 오류
-    public init(modelPath: String) throws {
-        // 모델 타입 추론 (파일 이름에서)
-        let url = URL(fileURLWithPath: modelPath)
-        let fileName = url.lastPathComponent
+    public init(encoderPath: String, decoderPath: String) throws {
+        self.modelType = .tiny // 기본값
+        self.encoderModelURL = URL(fileURLWithPath: encoderPath)
+        self.decoderModelURL = URL(fileURLWithPath: decoderPath)
         
-        if fileName.contains("tiny") {
-            self.modelType = .tiny
-        } else if fileName.contains("base") {
-            self.modelType = .base
-        } else if fileName.contains("small") {
-            self.modelType = .small
-        } else if fileName.contains("medium") {
-            self.modelType = .medium
-        } else if fileName.contains("large") {
-            self.modelType = .large
-        } else {
-            // 기본값
-            self.modelType = .tiny
-        }
-        
-        self.modelURL = url
+        // 각 컴포넌트 초기화
+        self.audioProcessor = AudioProcessor()
+        self.performanceOptimizer = PerformanceOptimizer(configuration: .default)
         
         // 토크나이저 초기화
-        let tokenizerResult = try Self.loadTokenizer()
-        self.tokenizer = tokenizerResult
-        
-        // 성능 최적화 관리자 초기화
-        self.performanceOptimizer = PerformanceOptimizer(configuration: .default)
+        self.tokenizer = try WhisperModel.loadTokenizer()
     }
     
     /// 모델 로드
     /// - Throws: 모델 로드 실패 시 오류
     public func loadModel() async throws {
-        // 모델 매니저를 통해 모델 로드
-        let modelManager = ModelManager.shared
+        // 모델이 이미 로드되어 있는지 확인
+        if encoderModel != nil && decoderModel != nil {
+            return
+        }
         
+        // 모델 파일 존재 확인
+        guard FileManager.default.fileExists(atPath: encoderModelURL.path) else {
+            throw WhisperError.modelFileNotFound("인코더 모델 파일을 찾을 수 없습니다: \(encoderModelURL.path)")
+        }
+        
+        guard FileManager.default.fileExists(atPath: decoderModelURL.path) else {
+            throw WhisperError.modelFileNotFound("디코더 모델 파일을 찾을 수 없습니다: \(decoderModelURL.path)")
+        }
+        
+        // 모델 로드
         do {
-            // 모델 매니저를 통해 모델 파일 확인 및 다운로드
-            let modelURL = try await modelManager.loadModel(modelType)
+            let encoderConfig = MLModelConfiguration()
+            encoderConfig.computeUnits = performanceOptimizer.getOptimalComputeUnits()
             
-            // 메모리 사용량 최적화를 위한 설정
-            let config = MLModelConfiguration()
-            config.computeUnits = await performanceOptimizer.recommendedComputeUnits()
+            let decoderConfig = MLModelConfiguration()
+            decoderConfig.computeUnits = performanceOptimizer.getOptimalComputeUnits()
             
-            // 메모리 최적화 설정
-            if modelType.sizeInMB >= 1000 { // 1GB 이상의 모델은 메모리 최적화 적용
-                config.computeUnits = .cpuAndGPU
-                config.allowLowPrecisionAccumulationOnGPU = true
-                
-                if #available(macOS 13.0, iOS 16.0, *) {
-                    // Neural Engine 사용 가능한 경우
-                    config.computeUnits = .cpuAndNeuralEngine
+            // 배경 작업에서 모델 로드
+            // 로컬 변수로 URL을 캡처하여 self 캡처 문제 해결
+            let localEncoderURL = self.encoderModelURL
+            let localDecoderURL = self.decoderModelURL
+            
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global().async {
+                    do {
+                        let encoder = try MLModel(contentsOf: localEncoderURL, configuration: encoderConfig)
+                        let decoder = try MLModel(contentsOf: localDecoderURL, configuration: decoderConfig)
+                        
+                        // 로드된 모델 설정
+                        self.encoderModel = encoder
+                        self.decoderModel = decoder
+                        continuation.resume()
+                    } catch {
+                        continuation.resume(throwing: WhisperError.modelLoadingFailed(error))
+                    }
                 }
             }
-            
-            // 모델 로드
-            self.model = try MLModel(contentsOf: modelURL, configuration: config)
-            
-            print("모델 로드 성공: \(modelType.rawValue)")
         } catch {
-            print("모델 로드 실패: \(error.localizedDescription)")
             throw WhisperError.modelLoadingFailed(error)
         }
     }
@@ -121,13 +130,11 @@ public class WhisperModel {
     /// - Parameter progressHandler: 진행 상황 핸들러
     /// - Returns: 다운로드 완료 Publisher
     public func downloadModel(progressHandler: @escaping (Double) -> Void) -> AnyPublisher<Void, WhisperError> {
-        guard let downloadURL = modelType.downloadURL else {
-            return Fail(error: WhisperError.invalidModelURL).eraseToAnyPublisher()
-        }
+        let downloadURL = modelType.huggingFaceModelURL
         
         // 다운로드 디렉토리 생성
         let fileManager = FileManager.default
-        let modelDirectory = modelURL.deletingLastPathComponent()
+        let modelDirectory = encoderModelURL.deletingLastPathComponent()
         
         do {
             if !fileManager.fileExists(atPath: modelDirectory.path) {
@@ -153,12 +160,16 @@ public class WhisperModel {
             
             do {
                 // 기존 파일 삭제
-                if fileManager.fileExists(atPath: self.modelURL.path) {
-                    try fileManager.removeItem(at: self.modelURL)
+                if fileManager.fileExists(atPath: self.encoderModelURL.path) {
+                    try fileManager.removeItem(at: self.encoderModelURL)
+                }
+                if fileManager.fileExists(atPath: self.decoderModelURL.path) {
+                    try fileManager.removeItem(at: self.decoderModelURL)
                 }
                 
                 // 다운로드한 파일 이동
-                try fileManager.moveItem(at: tempURL, to: self.modelURL)
+                try fileManager.moveItem(at: tempURL, to: self.encoderModelURL)
+                try fileManager.moveItem(at: tempURL, to: self.decoderModelURL)
                 subject.send(())
                 subject.send(completion: .finished)
             } catch {
@@ -204,7 +215,7 @@ public class WhisperModel {
         progressHandler: @escaping (Double) -> Void
     ) async throws -> TranscriptionResult {
         // 모델 로드 확인
-        if model == nil {
+        if encoderModel == nil || decoderModel == nil {
             try await loadModel()
         }
         
@@ -242,12 +253,12 @@ public class WhisperModel {
                     )
                     
                     // 모델 실행 (최적화된 설정 사용)
-                    guard let model = self.model else {
+                    guard let encoderModel = self.encoderModel else {
                         throw WhisperError.modelNotLoaded
                     }
                     
                     let prediction = try await Task.detached(priority: .userInitiated) {
-                        try model.prediction(from: modelInput)
+                        try encoderModel.prediction(from: modelInput)
                     }.value
                     
                     // 결과 처리
@@ -649,12 +660,10 @@ public class WhisperModel {
             "model_size_mb": modelType.sizeInMB
         ]
         
-        if let fileSize = modelType.modelFileSize() {
-            info["file_size_bytes"] = fileSize
-        }
-        
-        info["model_exists"] = modelType.modelExists()
-        info["model_path"] = modelURL.path
+        info["file_size_bytes"] = modelType.modelFileSize
+        info["model_exists"] = modelType.modelExists(at: encoderModelURL)
+        info["encoder_model_path"] = encoderModelURL.path
+        info["decoder_model_path"] = decoderModelURL.path
         
         return info
     }
@@ -663,11 +672,15 @@ public class WhisperModel {
     /// - Returns: 성공 여부
     public func deleteModel() throws {
         // 모델 인스턴스 해제
-        model = nil
+        encoderModel = nil
+        decoderModel = nil
         
         // 파일 삭제
-        if FileManager.default.fileExists(atPath: modelURL.path) {
-            try FileManager.default.removeItem(at: modelURL)
+        if FileManager.default.fileExists(atPath: encoderModelURL.path) {
+            try FileManager.default.removeItem(at: encoderModelURL)
+        }
+        if FileManager.default.fileExists(atPath: decoderModelURL.path) {
+            try FileManager.default.removeItem(at: decoderModelURL)
         }
     }
     
@@ -724,8 +737,9 @@ public class WhisperModelManager {
         
         // 모든 모델 타입에 대해 확인
         for modelType in WhisperModelType.allCases {
-            let modelURL = modelsDirectory.appendingPathComponent("\(modelType.rawValue).mlmodelc")
-            if fileManager.fileExists(atPath: modelURL.path) {
+            let encoderURL = modelsDirectory.appendingPathComponent("\(modelType.rawValue)_encoder.mlmodelc")
+            let decoderURL = modelsDirectory.appendingPathComponent("\(modelType.rawValue)_decoder.mlmodelc")
+            if fileManager.fileExists(atPath: encoderURL.path) && fileManager.fileExists(atPath: decoderURL.path) {
                 availableModels.append(modelType)
             }
         }
@@ -742,21 +756,25 @@ public class WhisperModelManager {
     
     /// 모델 다운로드
     public func downloadModel(_ modelType: WhisperModelType) async throws {
-        guard let downloadURL = modelType.downloadURL else {
-            throw WhisperError.downloadFailed("다운로드 URL이 없습니다.")
-        }
+        let downloadURL = modelType.huggingFaceModelURL
         
-        let destinationURL = modelsDirectory.appendingPathComponent("\(modelType.rawValue).mlmodelc")
+        let encoderDestinationURL = modelsDirectory.appendingPathComponent("\(modelType.rawValue)_encoder.mlmodelc")
+        let decoderDestinationURL = modelsDirectory.appendingPathComponent("\(modelType.rawValue)_decoder.mlmodelc")
         let fileManager = FileManager.default
         
         // 이미 존재하는 경우 삭제
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
+        if fileManager.fileExists(atPath: encoderDestinationURL.path) {
+            try fileManager.removeItem(at: encoderDestinationURL)
+        }
+        if fileManager.fileExists(atPath: decoderDestinationURL.path) {
+            try fileManager.removeItem(at: decoderDestinationURL)
         }
         
         // 다운로드 및 저장
-        let (tempURL, _) = try await URLSession.shared.download(from: downloadURL)
-        try fileManager.moveItem(at: tempURL, to: destinationURL)
+        let (tempEncoderURL, _) = try await URLSession.shared.download(from: downloadURL)
+        let (tempDecoderURL, _) = try await URLSession.shared.download(from: downloadURL)
+        try fileManager.moveItem(at: tempEncoderURL, to: encoderDestinationURL)
+        try fileManager.moveItem(at: tempDecoderURL, to: decoderDestinationURL)
     }
 }
 

@@ -6,7 +6,7 @@ public struct TranslationResult {
     /// 원본 텍스트
     public let originalText: String
     
-    /// 번역된 텍스트
+    /// 번역된 텍스트https://huggingface.co/cho407/WhisperCoreML/tree/main
     public let translatedText: String
     
     /// 원본 언어
@@ -68,6 +68,11 @@ public extension WhisperModel {
         // 시작 시간
         let startTime = Date()
         
+        // 모델이 로드되어 있는지 확인
+        if encoderModel == nil || decoderModel == nil {
+            try await loadModel()
+        }
+        
         // 오디오 처리
         progressHandler(0.1)
         
@@ -101,16 +106,27 @@ public extension WhisperModel {
         let modelInput = try prepareModelInput(melSpectrogram: melSpectrogram, options: transcriptionOptions)
         progressHandler(0.6)
         
-        // 모델 실행
-        guard let model = model else {
+        // 인코더 모델 실행
+        guard let encoder = self.encoderModel else {
             throw WhisperError.modelNotLoaded
         }
         
-        let modelOutput = try model.prediction(from: modelInput)
+        // 디코더 모델 실행
+        guard let decoder = self.decoderModel else {
+            throw WhisperError.modelNotLoaded
+        }
+        
+        // 인코더로 특징 추출
+        let encoderOutput = try encoder.prediction(from: modelInput)
+        progressHandler(0.7)
+        
+        // 디코더로 번역 수행
+        let decoderInput = try prepareDecoderInput(from: encoderOutput, options: transcriptionOptions)
+        let decoderOutput = try decoder.prediction(from: decoderInput)
         progressHandler(0.8)
         
         // 결과 처리
-        let segments = try await processModelOutput(modelOutput, options: transcriptionOptions, timeOffset: 0)
+        let segments = try await processModelOutput(decoderOutput, options: transcriptionOptions, timeOffset: 0)
         progressHandler(0.9)
         
         // 원본 텍스트 추출 (번역 전 텍스트)
@@ -119,7 +135,9 @@ public extension WhisperModel {
             task: .transcribe
         )
         
-        let originalSegments = try await processModelOutput(modelOutput, options: originalOptions, timeOffset: 0)
+        let originalDecoderInput = try prepareDecoderInput(from: encoderOutput, options: originalOptions)
+        let originalDecoderOutput = try decoder.prediction(from: originalDecoderInput)
+        let originalSegments = try await processModelOutput(originalDecoderOutput, options: originalOptions, timeOffset: 0)
         let originalText = originalSegments.map { $0.text }.joined(separator: " ")
         
         // 번역 결과 생성
@@ -132,7 +150,7 @@ public extension WhisperModel {
             translatedText: translatedText,
             sourceLanguage: detectedLanguage,
             targetLanguage: options.targetLanguage,
-            confidence: 0.9, // 실제 구현에서는 모델에서 신뢰도 계산
+            confidence: 0.9,
             processingTime: Date().timeIntervalSince(startTime)
         )
     }
@@ -189,19 +207,36 @@ public extension WhisperModel {
         // 모델 입력 준비
         let modelInput = try prepareModelInput(melSpectrogram: melSpectrogram, options: options)
         
-        // 모델 실행
-        guard let model = model else {
+        // 인코더 모델 실행
+        guard let encoder = self.encoderModel else {
             throw WhisperError.modelNotLoaded
         }
         
-        let modelOutput = try model.prediction(from: modelInput)
+        // 디코더 모델 실행
+        guard let decoder = self.decoderModel else {
+            throw WhisperError.modelNotLoaded
+        }
+        
+        // 인코더로 특징 추출
+        let encoderOutput = try encoder.prediction(from: modelInput)
+        
+        // 디코더로 언어 감지
+        let decoderInput = try prepareDecoderInput(from: encoderOutput, options: options)
+        let decoderOutput = try decoder.prediction(from: decoderInput)
         
         // 결과 처리
-        let segments = try await processModelOutput(modelOutput, options: options, timeOffset: 0)
+        let segments = try await processModelOutput(decoderOutput, options: options, timeOffset: 0)
         
         // 향상된 언어 감지 결과 사용
         let detectionResult = enhancedLanguageDetection(from: segments)
         
         return detectionResult.language
+    }
+    
+    /// 디코더 입력 준비
+    private func prepareDecoderInput(from encoderOutput: MLFeatureProvider, options: TranscriptionOptions) throws -> MLFeatureProvider {
+        // TODO: 실제 구현에서는 인코더 출력을 디코더 입력으로 변환하는 로직 구현
+        // 현재는 임시로 동일한 입력을 반환
+        return encoderOutput
     }
 } 

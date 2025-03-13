@@ -129,7 +129,7 @@ public class RealtimeTranscriber {
         )
         
         // 모델 실행
-        guard let modelOutput = try? model.model?.prediction(from: modelInput) else {
+        guard let modelOutput = try? model.encoderModel?.prediction(from: modelInput) else {
             throw WhisperError.modelOutputProcessingFailed("모델 실행 실패")
         }
         

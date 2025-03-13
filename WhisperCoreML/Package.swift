@@ -41,7 +41,8 @@ let package = Package(
                 "Language/README.md",
                 "Models/README.md",
                 "Transcription/README.md",
-                "Utils/README.md"
+                "Utils/README.md",
+                "Resource"
             ]),
         .target(
             name: "WhisperCoreMLUtils",

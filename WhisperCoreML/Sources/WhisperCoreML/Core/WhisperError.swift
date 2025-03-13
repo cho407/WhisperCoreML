@@ -14,6 +14,7 @@ public enum WhisperError: LocalizedError {
     case noModelsAvailableOffline
     case modelVersionMismatch(expected: String, found: String)
     case modelCorrupted(reason: String)
+    case modelFileNotFound(String)
     
     // 오디오 처리 관련 에러
     case audioProcessingFailed(String)
@@ -132,6 +133,8 @@ public enum WhisperError: LocalizedError {
             return "잘못된 설정: \(reason)"
         case .internalError(let reason):
             return "내부 에러: \(reason)"
+        case .modelFileNotFound(let reason):
+            return "모델 파일 없음: \(reason)"
         case .unknown(let reason):
             return "알 수 없는 에러: \(reason)"
         }

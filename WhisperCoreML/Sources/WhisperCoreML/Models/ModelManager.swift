@@ -59,7 +59,7 @@ public struct ModelCacheInfo: Codable {
     public var usageCount: Int
     
     /// 파일 크기 (바이트)
-    public let fileSize: Int64
+    public var fileSize: Int64
     
     /// 모델 버전
     public let version: String
@@ -155,6 +155,9 @@ public actor ModelManager {
     /// 최소 필요 디스크 공간 (20% 여유 공간)
     private let minimumDiskSpace: Int64 = 1024 * 1024 * 1024 // 1GB
     
+    /// 네트워크 모니터
+    private let networkMonitor = NWPathMonitor()
+    
     /// 다운로드 상태 발행자 (외부용)
     public var downloadStatePublisher: AnyPublisher<ModelDownloadState, Never> {
         downloadStateSubject.eraseToAnyPublisher()
@@ -162,6 +165,117 @@ public actor ModelManager {
     
     /// 최대 캐시 크기 (기본값: 5GB)
     public var maxCacheSize: Int64 = 5 * 1024 * 1024 * 1024
+    
+    /// 파일 크기 확인
+    private func getFileSize(_ url: URL) -> Int64? {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            return attributes[.size] as? Int64
+        } catch {
+            return nil
+        }
+    }
+    
+    /// 사용 가능한 디스크 공간 확인
+    private func getAvailableDiskSpace() -> Int64 {
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: modelsDirectory.path)
+            return attributes[.systemFreeSize] as? Int64 ?? 0
+        } catch {
+            return 0
+        }
+    }
+    
+    /// 네트워크 연결 확인
+    private func isNetworkAvailable() -> Bool {
+        networkMonitor.currentPath.status == .satisfied
+    }
+    
+    /// 캐시 정리
+    private func cleanCache(requiredSpace: Int64) async {
+        // 현재 캐시 크기 계산
+        let totalSize = cacheInfo.values.reduce(0) { $0 + $1.fileSize }
+        
+        // 최대 크기를 초과하지 않으면 종료
+        if totalSize <= maxCacheSize {
+            return
+        }
+        
+        // 삭제할 모델 선택 (LRU + 사용 빈도 고려)
+        let sortedModels = cacheInfo.values.sorted { model1, model2 in
+            // 점수 계산: 마지막 사용일 + 사용 빈도
+            let score1 = model1.lastUsedDate.timeIntervalSinceNow + Double(model1.usageCount)
+            let score2 = model2.lastUsedDate.timeIntervalSinceNow + Double(model2.usageCount)
+            return score1 < score2
+        }
+        
+        var currentSize = totalSize
+        for model in sortedModels {
+            // tiny 모델은 삭제하지 않음
+            if model.modelType == .tiny {
+                continue
+            }
+            
+            let modelURL = modelPath(for: model.modelType)
+            
+            do {
+                // 파일 삭제
+                try FileManager.default.removeItem(at: modelURL)
+                
+                // 캐시 정보에서 제거
+                cacheInfo.removeValue(forKey: model.modelType.rawValue)
+                
+                // 크기 업데이트
+                currentSize -= model.fileSize
+                
+                // 목표 크기에 도달하면 종료
+                if currentSize <= maxCacheSize {
+                    break
+                }
+            } catch {
+                print("모델 삭제 실패: \(error)")
+                continue
+            }
+        }
+        
+        // 캐시 정보 저장
+        saveCacheInfo()
+    }
+    
+    /// 캐시 정보 업데이트
+    private func updateCacheInfo(for type: WhisperModelType, fileSize: Int64? = nil) {
+        let modelURL = modelPath(for: type)
+        
+        // 파일 크기 확인
+        let size = fileSize ?? (getFileSize(modelURL) ?? 0)
+        
+        // 체크섬 계산 (실제 구현에서는 SHA-256 등 사용)
+        let checksum = "checksum-placeholder"
+        
+        // 기존 캐시 정보 확인
+        if var info = cacheInfo[type.rawValue] {
+            // 기존 정보 업데이트
+            info.lastUsedDate = Date()
+            info.usageCount += 1
+            info.fileSize = size
+            cacheInfo[type.rawValue] = info
+        } else {
+            // 새 캐시 정보 생성
+            let info = ModelCacheInfo(
+                modelType: type,
+                downloadDate: Date(),
+                lastUsedDate: Date(),
+                usageCount: 1,
+                fileSize: size,
+                version: "1.0",
+                checksum: checksum
+            )
+            cacheInfo[type.rawValue] = info
+        }
+        
+        // 캐시 정보 저장
+        saveCacheInfo()
+    }
     
     /// 초기화
     /// - Note: Swift 6에서는 액터 격리된 메서드 호출 시 비동기 컨텍스트가 필요합니다.
@@ -232,66 +346,165 @@ public actor ModelManager {
         return try await downloadModel(type)
     }
     
-    /// 모델 경로
-    /// - Parameter type: 모델 타입
-    /// - Returns: 모델 경로
-    public func modelPath(for type: WhisperModelType) -> URL {
-        modelsDirectory.appendingPathComponent("\(type.coreMLModelName).mlmodelc")
+    /// 모델 파일 경로
+    private func modelPath(for type: WhisperModelType) -> URL {
+        let fileManager = FileManager.default
+        let appSupportURL = try! fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let modelDirectory = appSupportURL.appendingPathComponent("WhisperCoreML/Models/\(type.rawValue)", isDirectory: true)
+        
+        // 디렉토리가 없으면 생성
+        if !fileManager.fileExists(atPath: modelDirectory.path) {
+            try? fileManager.createDirectory(at: modelDirectory, withIntermediateDirectories: true)
+        }
+        
+        return modelDirectory
     }
     
     /// 모델 다운로드
-    /// - Parameter type: 모델 타입
-    /// - Returns: 모델 URL
     public func downloadModel(_ type: WhisperModelType) async throws -> URL {
-        // 네트워크 상태 확인
-        guard NetworkMonitor.isNetworkAvailable() else {
+        // 이미 다운로드 중인지 확인
+        guard currentDownloadTask == nil else {
+            throw WhisperError.invalidConfiguration("이미 다운로드가 진행 중입니다")
+        }
+        
+        // 네트워크 연결 확인
+        guard isNetworkAvailable() else {
             throw WhisperError.networkUnavailable
         }
         
-        // 디스크 공간 확인
-        try checkDiskSpace(for: type)
+        // 필요한 디스크 공간 확인
+        let requiredSpace = Int64(Double(type.modelFileSize) * 1.2) // 20% 여유 공간
+        let availableSpace = getAvailableDiskSpace()
         
-        // 이미 다운로드 중인 경우 취소
-        currentDownloadTask?.cancel()
+        if availableSpace < requiredSpace {
+            // 캐시 정리 시도
+            await cleanCache(requiredSpace: requiredSpace)
+            
+            // 다시 공간 확인
+            if getAvailableDiskSpace() < requiredSpace {
+                throw WhisperError.insufficientDiskSpace
+            }
+        }
         
-        // 재시도 로직으로 다운로드 시도
-        return try await downloadWithRetry(type)
+        let modelDirectory = modelPath(for: type)
+        let encoderModelPath = type.localEncoderModelPath()
+        let decoderModelPath = type.localDecoderModelPath()
+        let configPath = type.localConfigFilePath()
+        
+        // 모든 필요한 파일이 이미 존재하는지 확인
+        if type.allRequiredFilesExist() {
+            return modelDirectory
+        }
+        
+        // 다운로드 작업 시작
+        currentDownloadTask = Task {
+            var attempt = 0
+            var lastError: Error?
+            
+            repeat {
+                do {
+                    // 인코더 모델 다운로드
+                    if !type.encoderModelExists() {
+                        try await downloadFile(from: type.encoderModelURL, to: encoderModelPath)
+                    }
+                    
+                    // 디코더 모델 다운로드
+                    if !type.decoderModelExists() {
+                        try await downloadFile(from: type.decoderModelURL, to: decoderModelPath)
+                    }
+                    
+                    // 설정 파일 다운로드
+                    if !type.configFileExists() {
+                        try await downloadFile(from: type.configFileURL, to: configPath)
+                    }
+                    
+                    // 캐시 정보 업데이트
+                    let modelCacheInfo = ModelCacheInfo(
+                        modelType: type,
+                        downloadDate: Date(),
+                        lastUsedDate: Date(),
+                        usageCount: 1,
+                        fileSize: type.modelFileSize,
+                        version: "1.0",
+                        checksum: ""
+                    )
+                    self.cacheInfo[type.rawValue] = modelCacheInfo
+                    saveCacheInfo()
+                    
+                    return modelDirectory
+                } catch {
+                    lastError = error
+                    attempt += 1
+                    if attempt < maxRetryAttempts {
+                        try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                    }
+                }
+            } while attempt < maxRetryAttempts
+            
+            throw lastError ?? WhisperError.downloadFailed("최대 재시도 횟수 초과")
+        }
+        
+        defer {
+            currentDownloadTask = nil
+        }
+        
+        return try await currentDownloadTask!.value
     }
     
-    /// 재시도 로직이 포함된 다운로드
-    private func downloadWithRetry(_ type: WhisperModelType, attempt: Int = 1) async throws -> URL {
+    /// 파일 다운로드
+    private func downloadFile(from url: URL, to destination: URL) async throws {
+        let (tempURL, response) = try await URLSession.shared.download(from: url)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WhisperError.networkError("Invalid response")
+        }
+        
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw WhisperError.serverError(httpResponse.statusCode)
+        }
+        
         do {
-            return try await performDownload(type)
+            try FileManager.default.moveItem(at: tempURL, to: destination)
         } catch {
-            if attempt < maxRetryAttempts {
-                // 재시도 전 대기
-                try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
-                
-                // 네트워크 상태 재확인
-                guard NetworkMonitor.isNetworkAvailable() else {
-                    throw WhisperError.networkUnavailable
-                }
-                
-                // 상태 업데이트
-                downloadStateSubject.send(.downloading(DetailedModelDownloadProgress(
-                    progress: 0,
-                    downloadedBytes: 0,
-                    totalBytes: 0,
-                    downloadSpeed: 0,
-                    estimatedTimeRemaining: 0,
-                    statusMessage: "재시도 중... (시도 \(attempt + 1)/\(maxRetryAttempts))"
-                )))
-                
-                // 재시도
-                return try await downloadWithRetry(type, attempt: attempt + 1)
-            }
-            throw error
+            throw WhisperError.fileSystemError("파일 이동 실패: \(error.localizedDescription)")
         }
     }
     
-    /// 실제 다운로드 수행
-    private func performDownload(_ type: WhisperModelType) async throws -> URL {
-        let task = Task<URL, Error> {
+    /// 공통 파일 다운로드
+    /// - Returns: 다운로드된 파일 경로 목록
+    public func downloadCommonFiles() async throws -> [URL] {
+        // 공통 파일이 저장될 디렉토리
+        let commonDirectory = modelsDirectory.appendingPathComponent("Common", isDirectory: true)
+        
+        // 디렉토리 생성
+        if !FileManager.default.fileExists(atPath: commonDirectory.path) {
+            try FileManager.default.createDirectory(at: commonDirectory, withIntermediateDirectories: true)
+        }
+        
+        // 다운로드할 파일 URL 및 로컬 경로
+        let filesToDownload: [(URL, URL)] = [
+            (WhisperModelType.tokenizerFileURL, commonDirectory.appendingPathComponent("tokenizer.json")),
+            (WhisperModelType.vocabFileURL, commonDirectory.appendingPathComponent("vocab.json")),
+            (WhisperModelType.tokenizerConfigURL, commonDirectory.appendingPathComponent("tokenizer_config.json")),
+            (WhisperModelType.specialTokensMapURL, commonDirectory.appendingPathComponent("special_tokens_map.json")),
+            (WhisperModelType.mergesFileURL, commonDirectory.appendingPathComponent("merges.txt")),
+            (WhisperModelType.normalizerFileURL, commonDirectory.appendingPathComponent("normalizer.json"))
+        ]
+        
+        var downloadedFiles: [URL] = []
+        
+        for (remoteURL, localURL) in filesToDownload {
+            // 파일이 이미 존재하는 경우 스킵
+            if FileManager.default.fileExists(atPath: localURL.path) {
+                downloadedFiles.append(localURL)
+                continue
+            }
+            
             // 다운로드 상태 업데이트
             downloadStateSubject.send(.downloading(DetailedModelDownloadProgress(
                 progress: 0,
@@ -299,17 +512,12 @@ public actor ModelManager {
                 totalBytes: 0,
                 downloadSpeed: 0,
                 estimatedTimeRemaining: 0,
-                statusMessage: "다운로드 준비 중..."
+                statusMessage: "공통 파일 다운로드 중: \(remoteURL.lastPathComponent)"
             )))
             
-            // GitHub Release URL 생성
-            let downloadURL = type.githubReleaseURL
-            let zipFilePath = modelsDirectory.appendingPathComponent("\(type.coreMLModelName).zip")
+            let request = URLRequest(url: remoteURL, timeoutInterval: 30)
             
-            // URLSession 다운로드 작업 생성
-            var request = URLRequest(url: downloadURL)
-            request.timeoutInterval = 30 // 30초 타임아웃
-            
+            // 파일 다운로드
             let (tempURL, response) = try await URLSession.shared.download(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -320,21 +528,12 @@ public actor ModelManager {
                 throw WhisperError.serverError(httpResponse.statusCode)
             }
             
-            // 다운로드 완료 후 임시 파일을 목적지로 이동
-            try FileManager.default.moveItem(at: tempURL, to: zipFilePath)
-            
-            // 압축 해제
-            return try await extractModel(from: zipFilePath, for: type)
+            // 임시 파일을 목적지로 이동
+            try FileManager.default.moveItem(at: tempURL, to: localURL)
+            downloadedFiles.append(localURL)
         }
         
-        currentDownloadTask = task
-        
-        do {
-            return try await task.value
-        } catch {
-            downloadStateSubject.send(.failed(error))
-            throw error
-        }
+        return downloadedFiles
     }
     
     /// 모델 파일 압축 해제
@@ -436,47 +635,6 @@ public actor ModelManager {
                 print("모델 삭제 실패: \(error)")
                 continue
             }
-        }
-        
-        // 캐시 정보 저장
-        saveCacheInfo()
-    }
-    
-    /// 캐시 정보 업데이트
-    /// - Parameter type: 모델 타입
-    private func updateCacheInfo(for type: WhisperModelType) {
-        let modelURL = modelPath(for: type)
-        
-        // 파일 크기 확인
-        let fileSize: Int64
-        do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: modelURL.path)
-            fileSize = attributes[.size] as? Int64 ?? 0
-        } catch {
-            fileSize = 0
-        }
-        
-        // 체크섬 계산 (간단한 구현)
-        let checksum = "checksum-placeholder"
-        
-        // 기존 캐시 정보 확인
-        if var info = cacheInfo[type.rawValue] {
-            // 기존 정보 업데이트
-            info.lastUsedDate = Date()
-            info.usageCount += 1
-            cacheInfo[type.rawValue] = info
-        } else {
-            // 새 캐시 정보 생성
-            let info = ModelCacheInfo(
-                modelType: type,
-                downloadDate: Date(),
-                lastUsedDate: Date(),
-                usageCount: 1,
-                fileSize: fileSize,
-                version: "1.0",
-                checksum: checksum
-            )
-            cacheInfo[type.rawValue] = info
         }
         
         // 캐시 정보 저장

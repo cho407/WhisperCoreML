@@ -398,7 +398,7 @@ public class ModelMetadataManager {
             supportedLanguages: supportedLanguages,
             performanceMetrics: performanceMetrics,
             filePath: modelPath,
-            downloadURL: modelType.downloadURL
+            downloadURL: modelType.huggingFaceModelURL
         )
     }
     
@@ -423,11 +423,9 @@ public class ModelMetadataManager {
             return extendedLanguages
         case .medium:
             return extendedLanguages
-        case .large:
-            return allLanguages
-        case .largeV2:
-            return allLanguages
         case .largeV3:
+            return allLanguages
+        case .largeV3Turbo:
             return allLanguages
         @unknown default:
             return baseLanguages
@@ -445,12 +443,10 @@ public class ModelMetadataManager {
             return PerformanceMetrics(accuracy: 0.82, processingSpeed: 1.8, memoryUsage: 600)
         case .medium:
             return PerformanceMetrics(accuracy: 0.88, processingSpeed: 1.2, memoryUsage: 1200)
-        case .large:
-            return PerformanceMetrics(accuracy: 0.93, processingSpeed: 0.8, memoryUsage: 2400)
-        case .largeV2:
-            return PerformanceMetrics(accuracy: 0.95, processingSpeed: 0.7, memoryUsage: 2600)
         case .largeV3:
             return PerformanceMetrics(accuracy: 0.96, processingSpeed: 0.6, memoryUsage: 2800)
+        case .largeV3Turbo:
+            return PerformanceMetrics(accuracy: 0.95, processingSpeed: 4.8, memoryUsage: 1680)
         @unknown default:
             return PerformanceMetrics(accuracy: 0.75, processingSpeed: 2.0, memoryUsage: 500)
         }
