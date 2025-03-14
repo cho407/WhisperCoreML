@@ -14,9 +14,6 @@ let package = Package(
         .library(
             name: "WhisperCoreML",
             targets: ["WhisperCoreML"]),
-        .library(
-            name: "WhisperCoreMLUtils",
-            targets: ["WhisperCoreMLUtils"]),
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
@@ -44,21 +41,10 @@ let package = Package(
                 "Utils/README.md",
                 "Resource"
             ]),
-        .target(
-            name: "WhisperCoreMLUtils",
-            dependencies: [
-                .product(name: "Algorithms", package: "swift-algorithms"),
-                .product(name: "Collections", package: "swift-collections")
-            ]),
         .testTarget(
             name: "WhisperCoreMLTests",
             dependencies: [
                 "WhisperCoreML"
-            ]),
-        .testTarget(
-            name: "WhisperCoreMLUtilsTests",
-            dependencies: [
-                "WhisperCoreMLUtils"
             ]),
     ]
 )

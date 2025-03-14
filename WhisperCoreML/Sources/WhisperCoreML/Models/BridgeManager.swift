@@ -106,7 +106,7 @@ public class ModelTypeBridge {
               let encoderName = getEncoderModelName(for: modelType) else {
             return nil
         }
-        return baseURL.appendingPathComponent("Whisper\(encoderName).mlpackage")
+        return baseURL.appendingPathComponent("Whisper\(encoderName).mlmodelc")
     }
     
     /// 모델 타입에 해당하는 디코더 모델 URL 반환
@@ -117,7 +117,7 @@ public class ModelTypeBridge {
               let decoderName = getDecoderModelName(for: modelType) else {
             return nil
         }
-        return baseURL.appendingPathComponent("Whisper\(decoderName).mlpackage")
+        return baseURL.appendingPathComponent("Whisper\(decoderName).mlmodelc")
     }
     
     /// 모델 타입에 해당하는 설정 파일 URL 반환
@@ -173,7 +173,7 @@ public class ModelTypeBridge {
               let encoderName = getEncoderModelName(for: modelType) else {
             return nil
         }
-        return modelDirectory.appendingPathComponent("Whisper\(encoderName).mlpackage")
+        return modelDirectory.appendingPathComponent("Whisper\(encoderName).mlmodelc")
     }
     
     /// 모델 타입에 해당하는 로컬 디코더 모델 경로 반환
@@ -184,7 +184,7 @@ public class ModelTypeBridge {
               let decoderName = getDecoderModelName(for: modelType) else {
             return nil
         }
-        return modelDirectory.appendingPathComponent("Whisper\(decoderName).mlpackage")
+        return modelDirectory.appendingPathComponent("Whisper\(decoderName).mlmodelc")
     }
     
     /// 모델 타입에 해당하는 로컬 설정 파일 경로 반환
@@ -350,8 +350,8 @@ public class ModelBridge {
         }
         
         let fileName = isEncoder ? "WhisperTinyEncoder" : "WhisperTinyDecoder"
-        guard let modelURL = bundle.url(forResource: fileName, withExtension: "mlpackage", subdirectory: "Resource/CoreMLModels/Tiny") else {
-            throw ModelError.modelNotFound("\(fileName).mlpackage 파일을 찾을 수 없습니다.")
+        guard let modelURL = bundle.url(forResource: fileName, withExtension: "mlmodelc", subdirectory: "Resource/CoreMLModels/Tiny") else {
+            throw ModelError.modelNotFound("\(fileName).mlmodelc 파일을 찾을 수 없습니다.")
         }
         
         return modelURL.path

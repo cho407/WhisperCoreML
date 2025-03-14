@@ -66,12 +66,12 @@ public enum WhisperModelType: String, CaseIterable, Identifiable, Sendable {
     
     /// 인코더 모델 다운로드 URL
     public var encoderModelURL: URL {
-        huggingFaceModelURL.appendingPathComponent("Whisper\(encoderModelName).mlpackage")
+        huggingFaceModelURL.appendingPathComponent("Whisper\(encoderModelName).mlmodelc")
     }
     
     /// 디코더 모델 다운로드 URL
     public var decoderModelURL: URL {
-        huggingFaceModelURL.appendingPathComponent("Whisper\(decoderModelName).mlpackage")
+        huggingFaceModelURL.appendingPathComponent("Whisper\(decoderModelName).mlmodelc")
     }
     
     /// 모델 구성 파일 다운로드 URL
@@ -164,7 +164,7 @@ public enum WhisperModelType: String, CaseIterable, Identifiable, Sendable {
             try? fileManager.createDirectory(at: modelDirectory, withIntermediateDirectories: true)
         }
         
-        return modelDirectory.appendingPathComponent("Whisper\(encoderModelName).mlpackage")
+        return modelDirectory.appendingPathComponent("Whisper\(encoderModelName).mlmodelc")
     }
     
     /// 디코더 모델 로컬 경로
@@ -183,7 +183,7 @@ public enum WhisperModelType: String, CaseIterable, Identifiable, Sendable {
             try? fileManager.createDirectory(at: modelDirectory, withIntermediateDirectories: true)
         }
         
-        return modelDirectory.appendingPathComponent("Whisper\(decoderModelName).mlpackage")
+        return modelDirectory.appendingPathComponent("Whisper\(decoderModelName).mlmodelc")
     }
     
     /// 모델 구성 파일 로컬 경로
